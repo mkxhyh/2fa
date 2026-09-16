@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { readFileSync, writeFileSync } from 'fs';
+import process from 'node:process';
+import { preserveWorkflowsForSync } from './sync-upstream-compat.js';
 
 const [, , localPath, upstreamPath, outputPath] = process.argv;
 
@@ -8,6 +10,10 @@ if (!localPath || !upstreamPath || !outputPath) {
 	console.error('Usage: node scripts/merge-wrangler-config.js <local> <upstream> <output>');
 	process.exit(1);
 }
+
+// Existing workflows execute this downloaded entry point after rsync. Repair any
+// skipped upstream files before reading wrangler.toml, then merge local settings.
+preserveWorkflowsForSync({ localPath, upstreamPath, outputPath });
 
 const local = normalize(readFileSync(localPath, 'utf8'));
 const upstream = normalize(readFileSync(upstreamPath, 'utf8'));
@@ -31,6 +37,9 @@ merged = mergeVarsSection(merged, local, '[vars]', ['SW_VERSION']);
 
 // Preserve environment-specific names and vars.
 merged = preserveSectionLineAssignment(merged, local, '[env.development]', 'name');
+// 保留本地维护者在 dev 块内显式声明的 routes（典型用法：routes = [] 防止继承顶层自定义域名，
+// 避免 deploy:dev 抢占生产域名）。注意：当前实现只支持单行赋值（含 routes = []）。
+merged = preserveSectionLineAssignment(merged, local, '[env.development]', 'routes');
 merged = mergeVarsSection(merged, local, '[env.development.vars]', ['SW_VERSION']);
 
 // Merge KV bindings, preserving existing IDs while adopting upstream structure.

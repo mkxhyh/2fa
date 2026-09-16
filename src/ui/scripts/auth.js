@@ -92,14 +92,29 @@ export function getAuthCode() {
       setLoginPasswordVisibility(tokenInput.type === 'password');
     }
 
+    // 检测是否处于无法保存 Secure Cookie 的不安全上下文（HTTP 且非本机地址）
+    // 登录 Cookie 带有 Secure 属性，HTTP 访问时浏览器会拒绝保存，导致反复要求登录
+    function isInsecureCookieContext() {
+      if (typeof window.isSecureContext === 'boolean') {
+        return !window.isSecureContext;
+      }
+      const localHosts = ['localhost', '127.0.0.1', '[::1]'];
+      return location.protocol === 'http:' && !localHosts.includes(location.hostname);
+    }
+
     // 显示登录模态框
     function showLoginModal() {
       const modal = document.getElementById('loginModal');
       const tokenInput = document.getElementById('loginToken');
       const errorDiv = document.getElementById('loginError');
+      const insecureWarning = document.getElementById('loginInsecureWarning');
 
       if (!modal) {
         return;
+      }
+
+      if (insecureWarning) {
+        insecureWarning.style.display = isInsecureCookieContext() ? 'block' : 'none';
       }
 
       if (loginModalHideTimer) {
@@ -116,12 +131,7 @@ export function getAuthCode() {
 
       setTimeout(() => tokenInput.focus(), 100);
 
-      // 回车键提交
-      tokenInput.onkeypress = function(e) {
-        if (e.key === 'Enter') {
-          handleLoginSubmit();
-        }
-      };
+      // 回车键提交由 <form> 原生 submit 事件处理（loginForm 的 onsubmit）
     }
 
     // 隐藏登录模态框
@@ -220,6 +230,31 @@ export function getAuthCode() {
         console.warn('清除缓存失败:', e);
       }
 
+      try {
+        Object.keys(otpIntervals || {}).forEach(secretId => {
+          clearInterval(otpIntervals[secretId]);
+          delete otpIntervals[secretId];
+        });
+      } catch (e) {
+        console.warn('清除验证码定时器失败:', e);
+      }
+
+      if (typeof clearAllOTPAnimations === 'function') {
+        clearAllOTPAnimations();
+      }
+      if (typeof clearOTPWindowScheduler === 'function') {
+        clearOTPWindowScheduler();
+      }
+
+      secrets = [];
+      filteredSecrets = [];
+      currentSearchQuery = '';
+      const secretsList = document.getElementById('secretsList');
+      if (secretsList) {
+        secretsList.innerHTML = '';
+        secretsList.style.display = 'none';
+      }
+
       showCenterToast('⚠️', '登录已过期，请重新登录');
       setTimeout(() => {
         showLoginModal();
@@ -269,6 +304,13 @@ export function getAuthCode() {
         });
       } catch (e) {
         console.warn('清除验证码定时器失败:', e);
+      }
+
+      if (typeof clearAllOTPAnimations === 'function') {
+        clearAllOTPAnimations();
+      }
+      if (typeof clearOTPWindowScheduler === 'function') {
+        clearOTPWindowScheduler();
       }
 
       secrets = [];

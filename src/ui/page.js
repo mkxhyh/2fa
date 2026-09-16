@@ -6,6 +6,7 @@
 
 import { getStyles } from './styles/index.js';
 import { getScripts, getCoreScripts } from './scripts/index.js';
+import { APP_VERSION } from '../utils/version.js';
 
 /**
  * 创建主页面（密钥管理界面）
@@ -45,7 +46,7 @@ function getHTMLStart() {
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>2FA - 密钥管理器</title>
 
   <!-- PWA Manifest -->
@@ -97,6 +98,31 @@ function getHTMLStart() {
         document.documentElement.setAttribute('data-theme', 'light');
       }
     })();
+  </script>
+
+  <!-- FAB 位置预注入 - Must run before paint to prevent FAB position flash -->
+  <script>
+    (function() {
+      try {
+        const raw = localStorage.getItem('2fa-fab-position');
+        if (!raw) return;
+        const pos = JSON.parse(raw);
+        if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return;
+        const vw = window.innerWidth || document.documentElement.clientWidth;
+        const vh = window.innerHeight || document.documentElement.clientHeight;
+        // 与 CSS 媒体查询保持一致：≤480px 时 FAB 为 40x40，其余 48x48
+        const size = vw <= 480 ? 40 : 48;
+        const margin = 8;
+        const maxX = Math.max(margin, vw - size - margin);
+        const maxY = Math.max(margin, vh - size - margin);
+        const x = Math.min(Math.max(pos.x, margin), maxX);
+        const y = Math.min(Math.max(pos.y, margin), maxY);
+        const style = document.createElement('style');
+        style.id = 'fab-init-position';
+        style.textContent = '.action-menu-float{left:' + x + 'px !important;top:' + y + 'px !important;right:auto !important;bottom:auto !important;}';
+        document.head.appendChild(style);
+      } catch (e) {}
+    })();
   </script>`;
 }
 
@@ -108,6 +134,26 @@ function getHTMLBody() {
 <body>
   <div class="container">
     <div class="content">
+      <div
+        id="clockWarning"
+        class="clock-warning"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        hidden
+      >
+        <div class="clock-warning-message">
+          <span class="clock-warning-icon" aria-hidden="true">⚠</span>
+          <span id="clockWarningText" class="clock-warning-text">本地时间可能不准确，验证码可能无效。</span>
+        </div>
+        <button
+          type="button"
+          id="clockSyncRetryButton"
+          class="clock-sync-retry-button"
+          onclick="retryClockSync()"
+        >重新校时</button>
+      </div>
+
       <div class="search-section">
         <div class="search-container">
           <!-- 防止浏览器自动填充的隐藏输入框 -->
@@ -123,7 +169,7 @@ function getHTMLBody() {
                    name="search-query"
                    class="search-input"
                    placeholder="搜索服务或账户名称"
-                   oninput="filterSecrets(this.value)"
+                   oninput="scheduleSecretFilter(this.value)"
                    autocomplete="off"
                    autocorrect="off"
                    autocapitalize="off"
@@ -140,21 +186,42 @@ function getHTMLBody() {
       </div>
           <div class="sort-controls">
             <details class="sort-dropdown" id="sortDropdown">
-              <summary class="sort-trigger" aria-label="排序" aria-haspopup="menu" title="排序">
+              <summary class="sort-trigger" aria-label="显示与排序" title="显示与排序">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M3 6h18"></path>
                   <path d="M6 12h12"></path>
                   <path d="M10 18h4"></path>
                 </svg>
-                <span class="sort-trigger-label">排序</span>
+                <span class="sort-trigger-label">显示与排序</span>
               </summary>
-              <div class="sort-menu" role="menu">
-                <button type="button" role="menuitemradio" aria-checked="true" class="sort-option active" data-sort="oldest-first" onclick="selectSort('oldest-first')">最早添加</button>
-                <button type="button" role="menuitemradio" aria-checked="false" class="sort-option" data-sort="newest-first" onclick="selectSort('newest-first')">最晚添加</button>
-                <button type="button" role="menuitemradio" aria-checked="false" class="sort-option" data-sort="name-asc" onclick="selectSort('name-asc')">服务名称 A-Z</button>
-                <button type="button" role="menuitemradio" aria-checked="false" class="sort-option" data-sort="name-desc" onclick="selectSort('name-desc')">服务名称 Z-A</button>
-                <button type="button" role="menuitemradio" aria-checked="false" class="sort-option" data-sort="account-asc" onclick="selectSort('account-asc')">账户名称 A-Z</button>
-                <button type="button" role="menuitemradio" aria-checked="false" class="sort-option" data-sort="account-desc" onclick="selectSort('account-desc')">账户名称 Z-A</button>
+              <div class="sort-menu" aria-label="显示与排序选项">
+                <div class="sort-menu-section">
+                  <div class="sort-menu-label" id="viewModeLabel">显示方式</div>
+                  <div class="view-mode-segmented" role="group" aria-labelledby="viewModeLabel">
+                    <button type="button" class="view-mode-option active" data-view-mode="grouped" aria-pressed="true" onclick="selectViewMode('grouped')">智能聚合</button>
+                    <button type="button" class="view-mode-option" data-view-mode="flat" aria-pressed="false" onclick="selectViewMode('flat')">全部平铺</button>
+                  </div>
+                </div>
+                <div class="sort-menu-divider"></div>
+                <div class="sort-menu-section group-sort-only" id="groupSortSection">
+                  <div class="sort-menu-label" id="groupSortLabel">聚合分组</div>
+                  <div class="view-mode-segmented" role="group" aria-labelledby="groupSortLabel">
+                    <button type="button" class="group-sort-option active" data-group-sort="name-asc" aria-pressed="true" onclick="selectGroupSort('name-asc')">名称 A-Z</button>
+                    <button type="button" class="group-sort-option" data-group-sort="name-desc" aria-pressed="false" onclick="selectGroupSort('name-desc')">名称 Z-A</button>
+                  </div>
+                </div>
+                <div class="sort-menu-divider group-sort-only"></div>
+                <div class="sort-menu-section">
+                  <div class="sort-menu-label" id="sortModeLabel">组内排序</div>
+                  <div class="sort-options" role="group" aria-labelledby="sortModeLabel">
+                    <button type="button" aria-pressed="true" class="sort-option active" data-sort="oldest-first" onclick="selectSort('oldest-first')">最早添加</button>
+                    <button type="button" aria-pressed="false" class="sort-option" data-sort="newest-first" onclick="selectSort('newest-first')">最晚添加</button>
+                    <button type="button" aria-pressed="false" class="sort-option flat-sort-only" data-sort="name-asc" onclick="selectSort('name-asc')">服务名称 A-Z</button>
+                    <button type="button" aria-pressed="false" class="sort-option flat-sort-only" data-sort="name-desc" onclick="selectSort('name-desc')">服务名称 Z-A</button>
+                    <button type="button" aria-pressed="false" class="sort-option" data-sort="account-asc" onclick="selectSort('account-asc')">账户名称 A-Z</button>
+                    <button type="button" aria-pressed="false" class="sort-option" data-sort="account-desc" onclick="selectSort('account-desc')">账户名称 Z-A</button>
+                  </div>
+                </div>
               </div>
             </details>
             <select id="sortSelect" class="sort-select-hidden" onchange="applySorting()" aria-hidden="true" tabindex="-1">
@@ -167,7 +234,7 @@ function getHTMLBody() {
             </select>
       </div>
           </div>
-          <div class="search-stats" id="searchStats" style="display: none;"></div>
+          <div class="search-stats" id="searchStats" role="status" aria-live="polite" aria-atomic="true"></div>
         </div>
       </div>
 
@@ -319,7 +386,7 @@ function getHTMLBody() {
             <div class="form-row" id="counterRow" style="display: none;">
               <div class="form-group-small" id="counterGroup">
                 <label for="secretCounter">📊 计数器</label>
-                <input type="number" id="secretCounter" value="0" min="0" step="1" placeholder="初始计数器值" autocomplete="off">
+                <input type="number" id="secretCounter" value="0" min="0" max="9007199254740991" step="1" placeholder="初始计数器值" autocomplete="off">
               </div>
             </div>
             
@@ -1163,6 +1230,16 @@ function getHTMLBody() {
             </div>
             <div class="settings-divider"></div>
             <div class="settings-section">
+              <h3 class="settings-section-title" id="settingsOTPAnimationTitle">验证码交接动效</h3>
+              <select id="settingsOTPAnimationMode" class="settings-select" aria-labelledby="settingsOTPAnimationTitle" onchange="applyOTPAnimationFromSettings(this.value)">
+                <option value="none">关闭动效</option>
+                <option value="flow">流转交接</option>
+                <option value="flip">翻牌交接</option>
+                <option value="spotlight">聚光显现</option>
+              </select>
+            </div>
+            <div class="settings-divider"></div>
+            <div class="settings-section">
               <h3 class="settings-section-title">批量导出和备份导出偏好格式</h3>
               <p class="settings-desc">设置批量导出和“导出备份”共用的默认格式。它会影响这两个导出弹窗的默认操作，也会用于新创建的手动备份、自动备份和远程自动备份文件。</p>
               <select id="settingsDefaultExportFormat" class="settings-select" onchange="saveDefaultExportFormat()">
@@ -1557,6 +1634,11 @@ function getHTMLBody() {
         请输入密码以管理密钥<br>
         <small class="login-modal-hint">或点击"取消"使用 OTP 生成功能</small>
       </p>
+      <div id="loginInsecureWarning" class="login-insecure-warning" style="display: none;">
+        <strong>⚠️ 当前正通过 HTTP 访问</strong>
+        浏览器无法在 HTTP 下保存登录状态，登录后仍会反复要求输入密码。请将地址栏中的 http:// 改为 https:// 后重新访问。
+      </div>
+      <form id="loginForm" onsubmit="event.preventDefault(); handleLoginSubmit(); return false;" autocomplete="on">
       <div class="form-group">
         <label for="loginToken">密码</label>
         <div class="login-password-wrapper">
@@ -1599,14 +1681,15 @@ function getHTMLBody() {
         </div>
       </div>
       <div class="button-group login-modal-actions">
-        <button onclick="window.location.href='/otp'" class="btn btn-secondary login-modal-cancel-btn">
+        <button type="button" onclick="window.location.href='/otp'" class="btn btn-secondary login-modal-cancel-btn">
           取消
         </button>
-        <button onclick="handleLoginSubmit()" class="btn btn-primary login-modal-submit-btn">
+        <button type="submit" class="btn btn-primary login-modal-submit-btn">
           登录
         </button>
       </div>
       <div id="loginError" class="login-modal-error"></div>
+      </form>
     </div>
   </div>
 
@@ -1631,6 +1714,9 @@ function getHTMLBody() {
       </div>
       <div class="footer-info">
         Made with ❤️ by <a href="https://github.com/wuzf" target="_blank" rel="noopener noreferrer" class="footer-link">wuzf</a>
+        <span class="footer-separator">•</span>
+        <span class="footer-version">v${APP_VERSION}</span>
+        <a id="footerUpdateBadge" class="footer-update-badge" href="https://github.com/wuzf/2fa" target="_blank" rel="noopener noreferrer" style="display: none;"></a>
       </div>
     </div>
   </footer>
@@ -1683,13 +1769,9 @@ function getHTMLBody() {
  */
 function getHTMLScripts(lazyLoad = true) {
 	const scriptContent = getInlineScripts(lazyLoad);
-	// 🔄 使用 CDN 作为主要来源（Service Worker 会自动缓存）
-	// jsQR 用于二维码扫描，qrcode-generator 用于二维码生成
-	return (
-		'<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js" crossorigin="anonymous"></script>\n<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" crossorigin="anonymous"></script>\n<script>\n' +
-		scriptContent +
-		'\n</script>'
-	);
+	// jsQR / qrcode-generator 改为按需加载（见 utils.js 中的 ensureJsQR / ensureQRCodeGen），
+	// 避免 ~150KB CDN 库阻塞首屏渲染。Service Worker 会在首次请求时按需缓存这两个 URL。
+	return '<script>\n' + scriptContent + '\n</script>';
 }
 
 /**
